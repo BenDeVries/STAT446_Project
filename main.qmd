@@ -27,52 +27,146 @@ The `echo: false` option disables the printing of code (only output is displayed
 
 
 ```{r}
+library(sampling)
+library(tidyverse)
 library(glmnet)
 library(tidyverse)
 library(ggplot2)
 library(caret)
-set.seed(446)
 
+# Perform stratified sampling
+set.seed(446)  # Set seed for reproducibility
+
+# Read the data
 dat <- read_csv("heart_disease2015.csv")
-sum(is.na(dat))
-factor_vars <- colnames(dat[, c(-1, -5, -20, -16, -17)])
-dat[factor_vars] <- lapply(dat[factor_vars], factor)
-dat$stratum <- paste(dat$Sex, dat$Smoker, dat$Income, sep = "")
-train_size <- 10000
-train_inds <- createDataPartition(dat$stratum,
-                                  p = train_size / dim(dat)[1],
-                                  list = F)
-TRAIN <- dat[c(train_inds), 1 : 23]
-VAL <- dat[-c(train_inds), 1 : 22]
 
+# Convert relevant variables into factors
+dat$Sex <- factor(dat$Sex)
+dat$Smoker <- factor(dat$Smoker)
+dat$Income <- factor(dat$Income)
+
+# Create the strata by combining sex, smoking status, and income
+dat$stratum <- paste(dat$Sex, dat$Smoker, dat$Income, sep = "_")
+
+# View the proportion of each stratum in the population
+stratum_counts <- dat %>% 
+  group_by(stratum) %>% 
+  summarise(N = n()) %>% 
+  mutate(Proportion = N / sum(N))
+
+print(stratum_counts)
+
+# Total desired sample size
+total_sample_size <- 1000
+
+# Calculate the sample size for each stratum based on its proportion
+stratum_counts <- stratum_counts %>%
+  mutate(SampleSize = round(Proportion * total_sample_size))
+
+print(stratum_counts)
+
+# Perform stratified sampling
+
+sampled_data <- strata(dat, stratanames = c("Sex", "Smoker", "Income"), 
+                       size = stratum_counts$SampleSize, method = "srswor")
+
+# Get the final sampled data
+final_sample <- getdata(dat, sampled_data)
+
+# View the stratified sampled data
+print(final_sample)
+
+
+sampled_data <- strata(dat, stratanames = c("Sex", "Smoker", "Income"), 
+                       size = stratum_counts$SampleSize, method = "srswor")
+
+# Get the final sampled data
+final_sample <- getdata(dat, sampled_data)
+
+# View the sampled data
+print(final_sample)
+
+# Optional: Check the distribution of the sampled data by stratum
+final_sample %>%
+  group_by(stratum) %>%
+  summarise(SampleSize = n())
+
+
+
+
+# Check for missing data
+sum(is.na(dat))
+
+# Select the columns that are factors
+factor_vars <- colnames(dat[, c(-1, -5, -20, -16, -17)])
+
+# Convert selected columns to factors
+dat[factor_vars] <- lapply(dat[factor_vars], factor)
+
+# Create a new stratum variable by combining sex, smoking status, and income
+dat$stratum <- paste(dat$Sex, dat$Smoker, dat$Income, sep = "")
+
+# Split the data into training and validation sets
+train_size <- 10000
+train_inds <- createDataPartition(dat$stratum, p = train_size / dim(dat)[1], list = FALSE)
+TRAIN <- dat[train_inds, 1:23]
+VAL <- dat[-train_inds, 1:23]
+
+# Ensure that factor levels in VAL match those in TRAIN
+for (col in factor_vars) {
+  VAL[[col]] <- factor(VAL[[col]], levels = levels(TRAIN[[col]]))
+}
+
+# Preliminary visualization of the stratum
 ggplot(data = dat) +
   geom_bar(aes(stratum))
 ggplot(data = TRAIN) +
   geom_bar(aes(stratum))
 
-
-#Preliminary results, no interactions or polynomials
-X_T <- model.matrix(HeartDiseaseorAttack ~ ., TRAIN[, 1 : 22])[, -1]
+# Prepare model matrices for training and validation datasets
+X_T <- model.matrix(HeartDiseaseorAttack ~ ., TRAIN[, 1:22])[, -1]
 Y_T <- TRAIN$HeartDiseaseorAttack
-X_V <- model.matrix(HeartDiseaseorAttack ~ ., VAL)[, -1]
+X_V <- model.matrix(HeartDiseaseorAttack ~ ., VAL[, 1:22])[, -1]
 Y_V <- VAL$HeartDiseaseorAttack
+
+# Create cross-validation folds
 num_folds <- 10
-folds <- loo::kfold_split_stratified(10, TRAIN$stratum)
-cross_val <- cv.glmnet(X_T, Y_T, alpha = 1, familly = binomial,
-                       foldid = folds)
+folds <- createFolds(TRAIN$stratum, k = num_folds, returnTrain = FALSE)
+
+# Convert folds list to foldid vector
+foldid <- numeric(nrow(TRAIN))
+for (i in seq_along(folds)) {
+  foldid[folds[[i]]] <- i
+}
+
+# Fit the logistic regression model using LASSO with cross-validation
+cross_val <- cv.glmnet(X_T, Y_T, alpha = 1, family = binomial, foldid = foldid)
+
+# Plot the cross-validation results
 plot(cross_val)
-coef(cross_val, lamb)
-m0 <- glmnet(X_T, Y_T, family = binomial, lambda = cross_val$lambda.min,
-             alpha = 1)
+
+# Extract the coefficients at the lambda value that minimizes the cross-validation error
+coef(cross_val, lambda = cross_val$lambda.min)
+
+# Fit the final model using the lambda that minimizes cross-validation error
+m0 <- glmnet(X_T, Y_T, family = binomial, lambda = cross_val$lambda.min, alpha = 1)
+
+# Make predictions on the validation set
 preds <- predict(m0, newx = X_V, type = "link")
 preds <- ifelse(preds > 0, 1, 0)
-#Overall accuracy
-sum(preds == Y_V) / length(Y_V)
+
+# Overall accuracy
+accuracy <- sum(preds == Y_V) / length(Y_V)
+print(paste("Accuracy:", accuracy))
+
+# Confusion matrix to evaluate the performance of the model
 cm <- confusionMatrix(reference = factor(Y_V), data = factor(preds))
-cm
-fourfoldplot(as.table(cm), color = c("purple", "gold"),
-             main = "Confusion Matrix")
+print(cm)
+
+# Plot the confusion matrix
+fourfoldplot(as.table(cm), color = c("purple", "gold"), main = "Confusion Matrix")
 ```
+
 
 
 
